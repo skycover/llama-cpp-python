@@ -247,7 +247,7 @@ def billing_allocate(settings, user_token, model, operation, tokens, ttl=300):
                         "ttl": ttl # 5 minutes
                 })
     if response.status_code == 200:
-        billing_log(f'{msg} -> {response.json()['transaction_id']}')
+        billing_log(f"{msg} -> {response.json()['transaction_id']}")
         return response.json()['transaction_id']
     # raise http error 401
     billing_log(f'{msg} -> FAIL')

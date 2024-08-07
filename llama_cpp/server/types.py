@@ -156,6 +156,7 @@ class CreateCompletionRequest(BaseModel):
         "json_schema_extra": {
             "examples": [
                 {
+                    "model": "gpt-3.5-turbo",
                     "prompt": "\n\n### Instructions:\nWhat is the capital of France?\n\n### Response:\n",
                     "stop": ["\n", "###"],
                 }
@@ -173,6 +174,7 @@ class CreateEmbeddingRequest(BaseModel):
         "json_schema_extra": {
             "examples": [
                 {
+                    "model": "gpt-3.5-turbo",
                     "input": "The food was delicious and the waiter...",
                 }
             ]

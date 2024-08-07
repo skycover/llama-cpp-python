@@ -20,11 +20,20 @@ Choose the alias for a model.
 
 Go https://billing.mlgpu.ru, register there, got a pipenode account and open manage notebook.
 Register a service, let's say 'your_llm' and register products in it as 'alias_in', 'alias_out', and also 'alias_emb' for embeddings.
+
 If you use config file for models settings, you can prepare several models and sould register the products for each model.
-Finally got the owner_token from your service.
+Note, that, at present, only one model can be loaded in memory at once. Selecting another 
+
+Finally got the *service_id* and *owner_token* from your service.
 
 ## Run
 
 ```
 python3 -m llama_cpp.server --n_gpu_layers=33 --embedding=true --model models/Meta-Llama-3.1-8B-Instruct-Q6_K.gguf --model_alias "Meta-Llama-3.1-8B-Instruct-Q6_K" --owner_token "XXXX-XXXX-XXXXX-XXXX"
 ```
+
+### Serve
+
+Now any user, registered in https://billing.mlgpu.ru can pay you for tokens.
+He should add your *service_id* to it's services list and use corresponding *user_token* for authentication.
+Also he should specify a model alias in all API calls.

@@ -4,6 +4,7 @@ import os
 import json
 import typing
 import contextlib
+import requests
 
 from threading import Lock
 from functools import partial
@@ -202,9 +203,21 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def authenticate(
+    request: Request,
     settings: Settings = Depends(get_server_settings),
     authorization: Optional[str] = Depends(bearer_scheme),
 ):
+    if settings.owner_token is not None:
+        if authorization:
+            request.state.user_token = authorization.credentials
+            return authorization.credentials
+
+        # raise http error 401
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user_token in API key",
+        )
+
     # Skip API key check if it's not set in settings
     if settings.api_key is None:
         return True
@@ -219,6 +232,40 @@ async def authenticate(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid API key",
     )
+
+
+def billing_allocate(settings, user_token, model, operation, tokens, ttl=300):
+    response = requests.post(settings.billing_url+"product/allocate",
+                    json={
+                        "owner_token": settings.owner_token,
+                        "user_token": user_token,
+                        "product_name": f'{model}_{operation}',
+                        "quantity": tokens,
+                        "ttl": ttl # 5 minutes
+                })
+    if response.status_code == 200:
+        return response.json()['transaction_id']
+    # raise http error 401
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=response.json()['detail'],
+    )
+
+
+def billing_confirm(settings, transaction_id, quantity=None):
+    if quantity is not None:
+        json={
+            "owner_token": settings.owner_token,
+            "transaction_id": transaction_id,
+            "quantity": quantity,
+        }
+    else:
+        json={
+            "owner_token": settings.owner_token,
+            "transaction_id": transaction_id,
+        }
+    response = requests.post(settings.billing_url+"product/confirm", json=json)
+    return response.status_code == 200
 
 
 openai_v1_tag = "OpenAI V1"
@@ -266,7 +313,9 @@ openai_v1_tag = "OpenAI V1"
 async def create_completion(
     request: Request,
     body: CreateCompletionRequest,
+    settings: Settings = Depends(get_server_settings),
 ) -> llama_cpp.Completion:
+
     exit_stack = contextlib.ExitStack()
     llama_proxy = await run_in_threadpool(
         lambda: exit_stack.enter_context(contextlib.contextmanager(get_llama_proxy)())
@@ -314,6 +363,14 @@ async def create_completion(
         else:
             kwargs["logits_processor"].extend(_min_tokens_logits_processor)
 
+    tokens = llama.tokenize(body.prompt.encode('utf-8'), special=True)
+    total_tokens_in = len(tokens)
+
+    if settings.owner_token != None:
+        print(f'Allocate {total_tokens_in=} and {body.max_tokens=}')
+        transaction_in = billing_allocate(settings, request.state.user_token, body.model, 'in', total_tokens_in)
+        transaction_out = billing_allocate(settings, request.state.user_token, body.model, 'out', body.max_tokens or 32000)
+
     iterator_or_completion: Union[
         llama_cpp.CreateCompletionResponse,
         Iterator[llama_cpp.CreateCompletionStreamResponse],
@@ -327,7 +384,20 @@ async def create_completion(
         # the iterator is valid and we can use it to stream the response.
         def iterator() -> Iterator[llama_cpp.CreateCompletionStreamResponse]:
             yield first_response
-            yield from iterator_or_completion
+            total_tokens_out = 0
+            for chunk in iterator_or_completion:
+                yield chunk
+                if 'content' in chunk['choices'][0]['delta']:
+                    total_tokens_out += 1
+                    #print(f'Chunk tokens {total_tokens_out}: {chunk}')
+
+            print(f'Completion has {total_tokens_in=} and {total_tokens_out=}')
+            if settings.owner_token != None:
+                if not billing_confirm(settings, transaction_in):
+                    print('Withdraw tokens in failed')
+                if not billing_confirm(settings, transaction_out, total_tokens_out):
+                    print('Withdraw tokens out failed')
+
             exit_stack.close()
 
         send_chan, recv_chan = anyio.create_memory_object_stream(10)
@@ -344,6 +414,14 @@ async def create_completion(
             ping_message_factory=_ping_message_factory,
         )
     else:
+        total_tokens_in = iterator_or_completion["usage"]["prompt_tokens"]
+        total_tokens_out = iterator_or_completion["usage"]["completion_tokens"]
+        print(f'Completion has {total_tokens_in=} and {total_tokens_out=}')
+        if settings.owner_token != None:
+            if not billing_confirm(settings, transaction_in, total_tokens_in):
+                print(f'Withdraw {total_tokens_in} tokens in failed')
+            if not billing_confirm(settings, transaction_out, total_tokens_out):
+                print(f'Withdraw {total_tokens_out} tokens out failed')
         return iterator_or_completion
 
 
@@ -397,6 +475,7 @@ async def create_embedding(
 )
 async def create_chat_completion(
     request: Request,
+    settings: Settings = Depends(get_server_settings),
     body: CreateChatCompletionRequest = Body(
         openapi_examples={
             "normal": {
@@ -508,6 +587,15 @@ async def create_chat_completion(
         else:
             kwargs["logits_processor"].extend(_min_tokens_logits_processor)
 
+    joined_prompt = '\n'.join(list(map(lambda m: m["content"], body.messages)))
+    tokens = llama.tokenize(joined_prompt.encode('utf-8'), special=True)
+    total_tokens_in = len(tokens) + 15
+
+    if settings.owner_token != None:
+        print(f'Allocate {total_tokens_in=} and {body.max_tokens=}')
+        transaction_in = billing_allocate(settings, request.state.user_token, body.model, 'in', total_tokens_in)
+        transaction_out = billing_allocate(settings, request.state.user_token, body.model, 'out', body.max_tokens or 32000)
+
     iterator_or_completion: Union[
         llama_cpp.ChatCompletion, Iterator[llama_cpp.ChatCompletionChunk]
     ] = await run_in_threadpool(llama.create_chat_completion, **kwargs)
@@ -520,7 +608,19 @@ async def create_chat_completion(
         # the iterator is valid and we can use it to stream the response.
         def iterator() -> Iterator[llama_cpp.ChatCompletionChunk]:
             yield first_response
-            yield from iterator_or_completion
+            total_tokens_out = 0
+            for chunk in iterator_or_completion:
+                yield chunk
+                if 'content' in chunk['choices'][0]['delta']:
+                    total_tokens_out += 1
+                    #print(f'Chunk tokens {total_tokens_out}: {chunk}')
+
+            print(f'Completion has {total_tokens_in=} and {total_tokens_out=}')
+            if settings.owner_token != None:
+                if not billing_confirm(settings, transaction_in):
+                    print('Withdraw tokens in failed')
+                if not billing_confirm(settings, transaction_out, total_tokens_out):
+                    print('Withdraw tokens out failed')
             exit_stack.close()
 
         send_chan, recv_chan = anyio.create_memory_object_stream(10)
@@ -537,6 +637,14 @@ async def create_chat_completion(
             ping_message_factory=_ping_message_factory,
         )
     else:
+        total_tokens_in = iterator_or_completion["usage"]["prompt_tokens"]
+        total_tokens_out = iterator_or_completion["usage"]["completion_tokens"]
+        print(f'Completion has {total_tokens_in=} and {total_tokens_out=}')
+        if settings.owner_token != None:
+            if not billing_confirm(settings, transaction_in, total_tokens_in):
+                print(f'Withdraw {total_tokens_in} tokens in failed')
+            if not billing_confirm(settings, transaction_out, total_tokens_out):
+                print(f'Withdraw {total_tokens_out} tokens out failed')
         exit_stack.close()
         return iterator_or_completion
 

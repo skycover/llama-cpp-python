@@ -213,6 +213,14 @@ class ServerSettings(BaseSettings):
         default=None,
         description="API key for authentication. If set all requests need to be authenticated.",
     )
+    owner_token: Optional[str] = Field(
+        default=None,
+        description="owner_token for https://billing.mlgpu.ru service. If set all requests need to be authenticated with user_token.",
+    )
+    billing_url: Optional[str] = Field(
+        default='https://billing.mlgpu.ru/api/',
+        description="Url for https://billing.mlgpu.ru API service. Works with owner_token.",
+    )
     interrupt_requests: bool = Field(
         default=True,
         description="Whether to interrupt requests when a new request is received.",
